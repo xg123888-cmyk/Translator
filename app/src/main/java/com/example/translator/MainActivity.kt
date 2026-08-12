@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.*
 import android.content.pm.PackageManager
 import android.graphics.Typeface
+import android.os.Build
 import android.os.Bundle
 import android.speech.*
 import android.speech.tts.TextToSpeech
@@ -40,7 +41,6 @@ class MainActivity : Activity() {
                 .build()
         )
     }
-
     private val zhEn by lazy {
         Translation.getClient(
             TranslatorOptions.Builder()
@@ -69,9 +69,9 @@ class MainActivity : Activity() {
             })
         }
 
-        title("中英离线翻译 2.1", 26f)
+        title("中英离线翻译 2.2", 26f)
         root.addView(TextView(this).apply {
-            text = "完整句子 · 离线模型 · 语音兼容模式 · 面对面对话"
+            text = "完整句子 · 离线模型 · 设备端语音优先 · 面对面对话"
             textSize = 14f
         })
 
@@ -88,7 +88,7 @@ class MainActivity : Activity() {
         }, full())
 
         voiceStatus = TextView(this).apply {
-            text = "语音：系统兼容识别（优先成功）"
+            text = "语音：2.2 设备端识别优先"
             setPadding(dp(10), dp(8), dp(10), dp(8))
         }
         root.addView(voiceStatus, full())
@@ -202,7 +202,7 @@ class MainActivity : Activity() {
         }, full())
 
         root.addView(TextView(this).apply {
-            text = "2.1：文本翻译仍可在模型下载后离线运行。语音输入改为优先调用手机系统识别界面，以提高不同手机的兼容性。"
+            text = "2.2：Android 12+ 优先尝试设备端语音识别；若设备端不可用，再尝试系统识别界面与默认识别服务。"
             textSize = 12f
         }, full())
 
@@ -258,11 +258,15 @@ class MainActivity : Activity() {
 
     private fun startVoice(lang: String) {
         pendingLang = lang
-
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_AUDIO)
+            return
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
+            voiceStatus.text = "语音：正在启动设备端识别…"
+            startDirectVoice(lang, onDevice = true)
             return
         }
 
@@ -270,61 +274,52 @@ class MainActivity : Activity() {
     }
 
     private fun launchSystemVoice(lang: String) {
-        voiceStatus.text = "语音：正在启动识别…"
-
+        voiceStatus.text = "语音：正在打开系统识别界面…"
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(
-                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-            )
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, lang)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
-            putExtra(
-                RecognizerIntent.EXTRA_PROMPT,
-                if (lang.startsWith("zh")) "请说中文" else "Please speak English"
-            )
+            putExtra(RecognizerIntent.EXTRA_PROMPT, if (lang.startsWith("zh")) "请说中文" else "Please speak English")
         }
-
         try {
             startActivityForResult(intent, REQUEST_SPEECH)
         } catch (_: ActivityNotFoundException) {
-            voiceStatus.text = "语音：系统界面不可用，尝试后台识别…"
-            startDirectVoice(lang)
+            voiceStatus.text = "语音：系统界面不可用，尝试默认识别服务…"
+            startDirectVoice(lang, onDevice = false)
         }
     }
 
-    private fun startDirectVoice(lang: String) {
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            voiceStatus.text = "语音：没有可用的语音识别服务"
-            toast("手机没有可用的语音识别服务")
+    private fun startDirectVoice(lang: String, onDevice: Boolean) {
+        if (!onDevice && !SpeechRecognizer.isRecognitionAvailable(this)) {
+            voiceStatus.text = "语音：手机没有可用的系统识别服务"
+            toast("手机没有可用的系统语音识别服务")
             return
         }
 
         recognizer?.destroy()
-        recognizer = SpeechRecognizer.createSpeechRecognizer(this)
+        recognizer = try {
+            if (onDevice && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                SpeechRecognizer.createOnDeviceSpeechRecognizer(this)
+            } else {
+                SpeechRecognizer.createSpeechRecognizer(this)
+            }
+        } catch (_: Exception) {
+            SpeechRecognizer.createSpeechRecognizer(this)
+        }
 
         recognizer?.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {
-                voiceStatus.text = "语音：请开始说话"
-            }
-            override fun onBeginningOfSpeech() {
-                voiceStatus.text = "语音：正在听…"
-            }
-            override fun onEndOfSpeech() {
-                voiceStatus.text = "语音：正在识别…"
-            }
+            override fun onReadyForSpeech(params: Bundle?) { voiceStatus.text = "语音：请开始说话" }
+            override fun onBeginningOfSpeech() { voiceStatus.text = "语音：正在听…" }
+            override fun onEndOfSpeech() { voiceStatus.text = "语音：正在识别…" }
             override fun onResults(results: Bundle?) {
-                val text = results
-                    ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull()
-                    .orEmpty()
+                val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
                 handleSpeech(text)
             }
             override fun onError(error: Int) {
                 val msg = speechError(error)
-                voiceStatus.text = "语音：$msg"
-                toast(msg)
+                voiceStatus.text = "语音：$msg（错误 $error）"
+                toast("$msg（错误 $error）")
             }
             override fun onRmsChanged(rmsdB: Float) {}
             override fun onBufferReceived(buffer: ByteArray?) {}
@@ -333,13 +328,14 @@ class MainActivity : Activity() {
         })
 
         recognizer?.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(
-                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-            )
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, lang)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, onDevice)
+            }
         })
     }
 
@@ -349,7 +345,6 @@ class MainActivity : Activity() {
             toast("没有识别到内容，请再试一次")
             return
         }
-
         voiceStatus.text = "语音：识别成功 ✓"
         input.setText(text)
         translate(autoSpeak)
@@ -357,31 +352,29 @@ class MainActivity : Activity() {
 
     private fun speechError(error: Int): String = when (error) {
         SpeechRecognizer.ERROR_AUDIO -> "录音发生错误"
-        SpeechRecognizer.ERROR_CLIENT -> "识别服务被中断，请重试"
-        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "没有麦克风权限"
+        SpeechRecognizer.ERROR_CLIENT -> "识别服务被中断"
+        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "语音服务拒绝录音权限"
         SpeechRecognizer.ERROR_NETWORK -> "语音服务网络错误"
         SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "语音服务网络超时"
-        SpeechRecognizer.ERROR_NO_MATCH -> "没有听清，请再说一次"
-        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "语音服务正忙，请稍后重试"
+        SpeechRecognizer.ERROR_NO_MATCH -> "没有听清"
+        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "语音服务正忙"
         SpeechRecognizer.ERROR_SERVER -> "语音识别服务错误"
         SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "没有检测到说话声音"
-        10 -> "请求过于频繁，请稍等再试"
-        11 -> "语音服务暂时不可用"
-        12 -> "当前语言不受语音服务支持"
-        13 -> "当前语言的语音模型不可用"
-        else -> "语音识别未完成（错误 $error）"
+        10 -> "请求过于频繁"
+        11 -> "语音服务连接已断开"
+        12 -> "当前语言不受支持"
+        13 -> "当前语言模型不可用"
+        else -> "语音识别未完成"
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-
         if (requestCode == REQUEST_SPEECH) {
             if (resultCode == RESULT_OK) {
-                val results =
-                    data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                val results = data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
                 handleSpeech(results?.firstOrNull().orEmpty())
             } else {
-                voiceStatus.text = "语音：识别已取消"
+                voiceStatus.text = "语音：系统识别已取消"
             }
         }
     }
@@ -392,10 +385,9 @@ class MainActivity : Activity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-
         if (requestCode == REQUEST_AUDIO) {
             if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
-                pendingLang?.let { launchSystemVoice(it) }
+                pendingLang?.let { startVoice(it) }
             } else {
                 voiceStatus.text = "语音：麦克风权限被拒绝"
                 toast("需要麦克风权限才能语音输入")
@@ -405,72 +397,35 @@ class MainActivity : Activity() {
 
     private fun speak() {
         val r = output.text.toString().trim()
-        if (r.isBlank() || r == "正在翻译…") {
-            toast("还没有翻译结果")
-            return
-        }
-        if (!ttsReady) {
-            toast("朗读服务尚未准备好")
-            return
-        }
+        if (r.isBlank() || r == "正在翻译…") { toast("还没有翻译结果"); return }
+        if (!ttsReady) { toast("朗读服务尚未准备好"); return }
 
         val locale = if (enToZh) Locale.SIMPLIFIED_CHINESE else Locale.US
         val ok = tts?.setLanguage(locale) ?: TextToSpeech.LANG_NOT_SUPPORTED
-
-        if (
-            ok == TextToSpeech.LANG_MISSING_DATA ||
-            ok == TextToSpeech.LANG_NOT_SUPPORTED
-        ) {
+        if (ok == TextToSpeech.LANG_MISSING_DATA || ok == TextToSpeech.LANG_NOT_SUPPORTED) {
             toast("手机缺少对应语言的朗读语音包")
             return
         }
-
         tts?.speak(r, TextToSpeech.QUEUE_FLUSH, null, "translation")
     }
 
     private fun saveHistory(source: String, translated: String) {
-        val stamp =
-            SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date())
+        val stamp = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date())
         val d = if (enToZh) "EN→中" else "中→EN"
-        val line =
-            "$stamp\t$d\t${source.replace("\n", " ")}\t${translated.replace("\n", " ")}"
-
-        val old = prefs.getString("history", "")
-            .orEmpty()
-            .lines()
-            .filter { it.isNotBlank() }
-
-        prefs.edit()
-            .putString(
-                "history",
-                (listOf(line) + old).take(20).joinToString("\n")
-            )
-            .apply()
+        val line = "$stamp\t$d\t${source.replace("\n"," ")}\t${translated.replace("\n"," ")}"
+        val old = prefs.getString("history", "").orEmpty().lines().filter { it.isNotBlank() }
+        prefs.edit().putString("history", (listOf(line) + old).take(20).joinToString("\n")).apply()
     }
 
     private fun renderHistory() {
         history.removeAllViews()
-
-        val lines = prefs.getString("history", "")
-            .orEmpty()
-            .lines()
-            .filter { it.isNotBlank() }
-
-        if (lines.isEmpty()) {
-            history.addView(TextView(this).apply { text = "暂无记录" })
-        }
-
+        val lines = prefs.getString("history", "").orEmpty().lines().filter { it.isNotBlank() }
+        if (lines.isEmpty()) history.addView(TextView(this).apply { text = "暂无记录" })
         lines.forEach { line ->
             val p = line.split("\t")
             history.addView(TextView(this).apply {
-                text =
-                    if (p.size >= 4)
-                        "${p[0]}  ${p[1]}\n${p[2]}\n→ ${p[3]}"
-                    else
-                        line
-
+                text = if (p.size >= 4) "${p[0]}  ${p[1]}\n${p[2]}\n→ ${p[3]}" else line
                 setPadding(dp(8), dp(8), dp(8), dp(8))
-
                 setOnClickListener {
                     if (p.size >= 4) {
                         enToZh = p[1] == "EN→中"
@@ -484,8 +439,7 @@ class MainActivity : Activity() {
     }
 
     private fun updateDirection() {
-        direction.text =
-            if (enToZh) "English → 中文" else "中文 → English"
+        direction.text = if (enToZh) "English → 中文" else "中文 → English"
     }
 
     override fun onDestroy() {
@@ -497,22 +451,12 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
-    private fun dp(v: Int) =
-        (v * resources.displayMetrics.density).toInt()
-
-    private fun full() =
-        LinearLayout.LayoutParams(-1, -2).apply {
-            topMargin = dp(6)
-        }
-
-    private fun weight() =
-        LinearLayout.LayoutParams(0, -2, 1f).apply {
-            marginStart = dp(3)
-            marginEnd = dp(3)
-        }
-
-    private fun toast(s: String) =
-        Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+    private fun full() = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) }
+    private fun weight() = LinearLayout.LayoutParams(0, -2, 1f).apply {
+        marginStart = dp(3); marginEnd = dp(3)
+    }
+    private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
 
     companion object {
         private const val REQUEST_AUDIO = 1001
