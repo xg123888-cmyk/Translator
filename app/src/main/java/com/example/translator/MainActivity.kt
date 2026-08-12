@@ -5,7 +5,7 @@ import android.app.Activity
 import android.content.*
 import android.content.pm.PackageManager
 import android.graphics.Typeface
-import android.os.*
+import android.os.Bundle
 import android.speech.*
 import android.speech.tts.TextToSpeech
 import android.view.Gravity
@@ -20,12 +20,16 @@ class MainActivity : Activity() {
     private lateinit var output: TextView
     private lateinit var direction: Button
     private lateinit var history: LinearLayout
-    private lateinit var status: TextView
+    private lateinit var modelStatus: TextView
+    private lateinit var voiceStatus: TextView
+
     private var enToZh = true
+    private var autoSpeak = false
+    private var pendingLang: String? = null
     private var recognizer: SpeechRecognizer? = null
     private var tts: TextToSpeech? = null
     private var ttsReady = false
-    private var autoSpeak = false
+
     private val prefs by lazy { getSharedPreferences("translator", MODE_PRIVATE) }
 
     private val enZh by lazy {
@@ -36,6 +40,7 @@ class MainActivity : Activity() {
                 .build()
         )
     }
+
     private val zhEn by lazy {
         Translation.getClient(
             TranslatorOptions.Builder()
@@ -56,28 +61,37 @@ class MainActivity : Activity() {
         }
         scroll.addView(root)
 
-        fun addText(text: String, size: Float, bold: Boolean = false) {
+        fun title(text: String, size: Float) {
             root.addView(TextView(this).apply {
                 this.text = text
                 textSize = size
-                if (bold) setTypeface(typeface, Typeface.BOLD)
+                setTypeface(typeface, Typeface.BOLD)
             })
         }
 
-        addText("中英离线翻译 2.0", 26f, true)
-        addText("完整句子 · 离线模型 · 语音 · 对话 · 隐私优先", 14f)
+        title("中英离线翻译 2.1", 26f)
+        root.addView(TextView(this).apply {
+            text = "完整句子 · 离线模型 · 语音兼容模式 · 面对面对话"
+            textSize = 14f
+        })
 
-        status = TextView(this).apply {
+        modelStatus = TextView(this).apply {
             text = "离线模型：首次使用需要联网下载"
             setPadding(dp(10), dp(10), dp(10), dp(10))
             setBackgroundColor(0xFFF1F3F4.toInt())
         }
-        root.addView(status, full())
+        root.addView(modelStatus, full())
 
         root.addView(Button(this).apply {
             text = "下载 / 检查离线模型"
             setOnClickListener { downloadModels(true) }
         }, full())
+
+        voiceStatus = TextView(this).apply {
+            text = "语音：系统兼容识别（优先成功）"
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+        }
+        root.addView(voiceStatus, full())
 
         direction = Button(this).apply {
             text = "English → 中文"
@@ -101,32 +115,32 @@ class MainActivity : Activity() {
         }
         root.addView(input, LinearLayout.LayoutParams(-1, dp(150)))
 
-        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        actions.addView(Button(this).apply {
+        val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        row1.addView(Button(this).apply {
             text = "翻译"
             setOnClickListener { translate(false) }
         }, weight())
-        actions.addView(Button(this).apply {
+        row1.addView(Button(this).apply {
             text = "清空"
             setOnClickListener { input.setText(""); output.text = "" }
         }, weight())
-        root.addView(actions, full())
+        root.addView(row1, full())
 
-        val voices = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        voices.addView(Button(this).apply {
+        val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        row2.addView(Button(this).apply {
             text = "🎙 语音输入"
             setOnClickListener {
                 autoSpeak = false
                 startVoice(if (enToZh) "en-US" else "zh-CN")
             }
         }, weight())
-        voices.addView(Button(this).apply {
+        row2.addView(Button(this).apply {
             text = "🔊 朗读结果"
             setOnClickListener { speak() }
         }, weight())
-        root.addView(voices, full())
+        root.addView(row2, full())
 
-        addText("翻译结果", 17f, true)
+        title("翻译结果", 17f)
         output = TextView(this).apply {
             textSize = 21f
             minHeight = dp(120)
@@ -149,11 +163,13 @@ class MainActivity : Activity() {
             }
         }, full())
 
-        addText("面对面对话", 19f, true)
-        addText("点一方说话，识别后自动翻译并朗读给另一方。", 13f)
+        title("面对面对话", 19f)
+        root.addView(TextView(this).apply {
+            text = "点一方说话，识别后自动翻译并朗读给另一方。"
+        })
 
-        val convo = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        convo.addView(Button(this).apply {
+        val row3 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        row3.addView(Button(this).apply {
             text = "🎙 中文说话"
             setOnClickListener {
                 enToZh = false
@@ -162,8 +178,8 @@ class MainActivity : Activity() {
                 startVoice("zh-CN")
             }
         }, weight())
-        convo.addView(Button(this).apply {
-            text = "🎙 English"
+        row3.addView(Button(this).apply {
+            text = "🎙 ENGLISH"
             setOnClickListener {
                 enToZh = true
                 updateDirection()
@@ -171,11 +187,12 @@ class MainActivity : Activity() {
                 startVoice("en-US")
             }
         }, weight())
-        root.addView(convo, full())
+        root.addView(row3, full())
 
-        addText("最近记录", 17f, true)
+        title("最近记录", 17f)
         history = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(history, full())
+
         root.addView(Button(this).apply {
             text = "清除记录"
             setOnClickListener {
@@ -184,7 +201,10 @@ class MainActivity : Activity() {
             }
         }, full())
 
-        addText("首次下载中英文模型时需要网络。下载完成后文本翻译可离线运行。语音是否完全离线取决于手机系统的离线语音服务。", 12f)
+        root.addView(TextView(this).apply {
+            text = "2.1：文本翻译仍可在模型下载后离线运行。语音输入改为优先调用手机系统识别界面，以提高不同手机的兼容性。"
+            textSize = 12f
+        }, full())
 
         setContentView(scroll)
         renderHistory()
@@ -192,19 +212,19 @@ class MainActivity : Activity() {
     }
 
     private fun downloadModels(showToast: Boolean) {
-        status.text = "离线模型：正在准备…"
+        modelStatus.text = "离线模型：正在准备…"
         val c = DownloadConditions.Builder().build()
         enZh.downloadModelIfNeeded(c).addOnSuccessListener {
             zhEn.downloadModelIfNeeded(c).addOnSuccessListener {
-                status.text = "离线模型：已就绪 ✓"
+                modelStatus.text = "离线模型：已就绪 ✓"
                 prefs.edit().putBoolean("modelsReady", true).apply()
                 if (showToast) toast("离线模型已就绪")
             }.addOnFailureListener {
-                status.text = "离线模型：下载失败"
+                modelStatus.text = "离线模型：下载失败"
                 if (showToast) toast("请检查网络后重试")
             }
         }.addOnFailureListener {
-            status.text = "离线模型：下载失败"
+            modelStatus.text = "离线模型：下载失败"
             if (showToast) toast("请检查网络后重试")
         }
     }
@@ -212,11 +232,13 @@ class MainActivity : Activity() {
     private fun translate(speakAfter: Boolean) {
         val source = input.text.toString().trim()
         if (source.isEmpty()) { toast("请输入内容"); return }
+
         output.text = "正在翻译…"
         val tr = if (enToZh) enZh else zhEn
+
         tr.downloadModelIfNeeded(DownloadConditions.Builder().build())
             .addOnSuccessListener {
-                status.text = "离线模型：已就绪 ✓"
+                modelStatus.text = "离线模型：已就绪 ✓"
                 prefs.edit().putBoolean("modelsReady", true).apply()
                 tr.translate(source).addOnSuccessListener { result ->
                     output.text = result
@@ -229,87 +251,226 @@ class MainActivity : Activity() {
                 }
             }.addOnFailureListener {
                 output.text = ""
-                status.text = "离线模型：尚未下载"
+                modelStatus.text = "离线模型：尚未下载"
                 toast("首次使用请先联网下载模型")
             }
     }
 
     private fun startVoice(lang: String) {
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1001)
-            toast("请允许麦克风权限后再点一次")
+        pendingLang = lang
+
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_AUDIO)
             return
         }
+
+        launchSystemVoice(lang)
+    }
+
+    private fun launchSystemVoice(lang: String) {
+        voiceStatus.text = "语音：正在启动识别…"
+
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, lang)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+            putExtra(
+                RecognizerIntent.EXTRA_PROMPT,
+                if (lang.startsWith("zh")) "请说中文" else "Please speak English"
+            )
+        }
+
+        try {
+            startActivityForResult(intent, REQUEST_SPEECH)
+        } catch (_: ActivityNotFoundException) {
+            voiceStatus.text = "语音：系统界面不可用，尝试后台识别…"
+            startDirectVoice(lang)
+        }
+    }
+
+    private fun startDirectVoice(lang: String) {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            toast("这台手机没有可用的语音识别服务")
+            voiceStatus.text = "语音：没有可用的语音识别服务"
+            toast("手机没有可用的语音识别服务")
             return
         }
 
         recognizer?.destroy()
-        recognizer = if (
-            Build.VERSION.SDK_INT >= 31 &&
-            SpeechRecognizer.isOnDeviceRecognitionAvailable(this)
-        ) {
-            try { SpeechRecognizer.createOnDeviceSpeechRecognizer(this) }
-            catch (_: Exception) { SpeechRecognizer.createSpeechRecognizer(this) }
-        } else SpeechRecognizer.createSpeechRecognizer(this)
+        recognizer = SpeechRecognizer.createSpeechRecognizer(this)
 
         recognizer?.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) { toast("请开始说话") }
-            override fun onResults(results: Bundle?) {
-                val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
-                if (text.isNotBlank()) {
-                    input.setText(text)
-                    translate(autoSpeak)
-                } else toast("没有识别到内容")
+            override fun onReadyForSpeech(params: Bundle?) {
+                voiceStatus.text = "语音：请开始说话"
             }
-            override fun onError(error: Int) { toast("语音识别未完成（$error）") }
-            override fun onBeginningOfSpeech() {}
+            override fun onBeginningOfSpeech() {
+                voiceStatus.text = "语音：正在听…"
+            }
+            override fun onEndOfSpeech() {
+                voiceStatus.text = "语音：正在识别…"
+            }
+            override fun onResults(results: Bundle?) {
+                val text = results
+                    ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()
+                    .orEmpty()
+                handleSpeech(text)
+            }
+            override fun onError(error: Int) {
+                val msg = speechError(error)
+                voiceStatus.text = "语音：$msg"
+                toast(msg)
+            }
             override fun onRmsChanged(rmsdB: Float) {}
             override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() {}
             override fun onPartialResults(partialResults: Bundle?) {}
             override fun onEvent(eventType: Int, params: Bundle?) {}
         })
 
         recognizer?.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, lang)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
         })
+    }
+
+    private fun handleSpeech(text: String) {
+        if (text.isBlank()) {
+            voiceStatus.text = "语音：没有识别到内容"
+            toast("没有识别到内容，请再试一次")
+            return
+        }
+
+        voiceStatus.text = "语音：识别成功 ✓"
+        input.setText(text)
+        translate(autoSpeak)
+    }
+
+    private fun speechError(error: Int): String = when (error) {
+        SpeechRecognizer.ERROR_AUDIO -> "录音发生错误"
+        SpeechRecognizer.ERROR_CLIENT -> "识别服务被中断，请重试"
+        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "没有麦克风权限"
+        SpeechRecognizer.ERROR_NETWORK -> "语音服务网络错误"
+        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "语音服务网络超时"
+        SpeechRecognizer.ERROR_NO_MATCH -> "没有听清，请再说一次"
+        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "语音服务正忙，请稍后重试"
+        SpeechRecognizer.ERROR_SERVER -> "语音识别服务错误"
+        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "没有检测到说话声音"
+        10 -> "请求过于频繁，请稍等再试"
+        11 -> "语音服务暂时不可用"
+        12 -> "当前语言不受语音服务支持"
+        13 -> "当前语言的语音模型不可用"
+        else -> "语音识别未完成（错误 $error）"
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+
+        if (requestCode == REQUEST_SPEECH) {
+            if (resultCode == RESULT_OK) {
+                val results =
+                    data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                handleSpeech(results?.firstOrNull().orEmpty())
+            } else {
+                voiceStatus.text = "语音：识别已取消"
+            }
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+
+        if (requestCode == REQUEST_AUDIO) {
+            if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+                pendingLang?.let { launchSystemVoice(it) }
+            } else {
+                voiceStatus.text = "语音：麦克风权限被拒绝"
+                toast("需要麦克风权限才能语音输入")
+            }
+        }
     }
 
     private fun speak() {
         val r = output.text.toString().trim()
-        if (r.isBlank() || r == "正在翻译…") { toast("还没有翻译结果"); return }
-        if (!ttsReady) { toast("朗读服务尚未准备好"); return }
-        val loc = if (enToZh) Locale.SIMPLIFIED_CHINESE else Locale.US
-        val ok = tts?.setLanguage(loc) ?: TextToSpeech.LANG_NOT_SUPPORTED
-        if (ok == TextToSpeech.LANG_MISSING_DATA || ok == TextToSpeech.LANG_NOT_SUPPORTED) {
+        if (r.isBlank() || r == "正在翻译…") {
+            toast("还没有翻译结果")
+            return
+        }
+        if (!ttsReady) {
+            toast("朗读服务尚未准备好")
+            return
+        }
+
+        val locale = if (enToZh) Locale.SIMPLIFIED_CHINESE else Locale.US
+        val ok = tts?.setLanguage(locale) ?: TextToSpeech.LANG_NOT_SUPPORTED
+
+        if (
+            ok == TextToSpeech.LANG_MISSING_DATA ||
+            ok == TextToSpeech.LANG_NOT_SUPPORTED
+        ) {
             toast("手机缺少对应语言的朗读语音包")
             return
         }
+
         tts?.speak(r, TextToSpeech.QUEUE_FLUSH, null, "translation")
     }
 
     private fun saveHistory(source: String, translated: String) {
-        val stamp = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date())
+        val stamp =
+            SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date())
         val d = if (enToZh) "EN→中" else "中→EN"
-        val line = "$stamp\t$d\t${source.replace("\n"," ")}\t${translated.replace("\n"," ")}"
-        val old = prefs.getString("history", "").orEmpty().lines().filter { it.isNotBlank() }
-        prefs.edit().putString("history", (listOf(line) + old).take(20).joinToString("\n")).apply()
+        val line =
+            "$stamp\t$d\t${source.replace("\n", " ")}\t${translated.replace("\n", " ")}"
+
+        val old = prefs.getString("history", "")
+            .orEmpty()
+            .lines()
+            .filter { it.isNotBlank() }
+
+        prefs.edit()
+            .putString(
+                "history",
+                (listOf(line) + old).take(20).joinToString("\n")
+            )
+            .apply()
     }
 
     private fun renderHistory() {
         history.removeAllViews()
-        val lines = prefs.getString("history", "").orEmpty().lines().filter { it.isNotBlank() }
-        if (lines.isEmpty()) history.addView(TextView(this).apply { text = "暂无记录" })
+
+        val lines = prefs.getString("history", "")
+            .orEmpty()
+            .lines()
+            .filter { it.isNotBlank() }
+
+        if (lines.isEmpty()) {
+            history.addView(TextView(this).apply { text = "暂无记录" })
+        }
+
         lines.forEach { line ->
             val p = line.split("\t")
             history.addView(TextView(this).apply {
-                text = if (p.size >= 4) "${p[0]}  ${p[1]}\n${p[2]}\n→ ${p[3]}" else line
+                text =
+                    if (p.size >= 4)
+                        "${p[0]}  ${p[1]}\n${p[2]}\n→ ${p[3]}"
+                    else
+                        line
+
                 setPadding(dp(8), dp(8), dp(8), dp(8))
+
                 setOnClickListener {
                     if (p.size >= 4) {
                         enToZh = p[1] == "EN→中"
@@ -323,7 +484,8 @@ class MainActivity : Activity() {
     }
 
     private fun updateDirection() {
-        direction.text = if (enToZh) "English → 中文" else "中文 → English"
+        direction.text =
+            if (enToZh) "English → 中文" else "中文 → English"
     }
 
     override fun onDestroy() {
@@ -335,10 +497,25 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
-    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
-    private fun full() = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) }
-    private fun weight() = LinearLayout.LayoutParams(0, -2, 1f).apply {
-        marginStart = dp(3); marginEnd = dp(3)
+    private fun dp(v: Int) =
+        (v * resources.displayMetrics.density).toInt()
+
+    private fun full() =
+        LinearLayout.LayoutParams(-1, -2).apply {
+            topMargin = dp(6)
+        }
+
+    private fun weight() =
+        LinearLayout.LayoutParams(0, -2, 1f).apply {
+            marginStart = dp(3)
+            marginEnd = dp(3)
+        }
+
+    private fun toast(s: String) =
+        Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+
+    companion object {
+        private const val REQUEST_AUDIO = 1001
+        private const val REQUEST_SPEECH = 1002
     }
-    private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
 }
